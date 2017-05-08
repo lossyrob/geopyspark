@@ -10,6 +10,9 @@ from shapely.geometry import Polygon
 from shapely.wkt import dumps
 from geopyspark.geotrellis.constants import (RESAMPLE_METHODS,
                                              OPERATIONS,
+                                             SLOPE,
+                                             ASPECT,
+                                             SQUARE,
                                              NEIGHBORHOODS,
                                              NEARESTNEIGHBOR,
                                              FLOAT,
@@ -18,6 +21,8 @@ from geopyspark.geotrellis.constants import (RESAMPLE_METHODS,
                                              LESSTHANOREQUALTO,
                                              NODATAINT
                                             )
+from geopyspark.geotrellis.neighborhoods import Neighborhood
+
 
 def _reclassify(srdd, value_map, data_type, boundary_strategy, replace_nodata_with):
     new_dict = {}
@@ -91,7 +96,7 @@ class RasterRDD(object):
         key = geopysc.map_key_input(rdd_type, False)
 
         schema = geopysc.create_schema(key)
-        ser = geopysc.create_tuple_serializer(schema, key_type=None, value_type=TILE)
+        ser = geopysc.create_tuple_serializer(schema, key_type="Projected", value_type=TILE)
         reserialized_rdd = numpy_rdd._reserialize(ser)
 
         if rdd_type == SPATIAL:
@@ -117,8 +122,34 @@ class RasterRDD(object):
         """
 
         result = self.srdd.toAvroRDD()
-        ser = self.geopysc.create_tuple_serializer(result._2(), value_type=TILE)
+        ser = self.geopysc.create_tuple_serializer(result._2(), key_type="Projected", value_type=TILE)
         return self.geopysc.create_python_rdd(result._1(), ser)
+
+    def to_tiled_layer(self, extent=None, layout=None, crs=None, tile_size=256,
+                       resample_method=NEARESTNEIGHBOR):
+        """Converts this ``RasterRDD`` to a ``TiledRasterRDD``.
+
+        This method combines :meth:`~geopyspark.geotrellis.rdd.RasterRDD.collect_metadata` and
+        :meth:`~geopyspark.geotrellis.rdd.RasterRDD.tile_to_layout` into one step.
+
+        Args:
+            extent (:ref:`extent`, optional): Specify layout extent, must also specify layout.
+            layout (:ref:`tile_layout`, optional): Specify tile layout, must also specify extent.
+            crs (str or int, optional): Ignore CRS from records and use given one instead.
+            tile_size (int, optional): Pixel dimensions of each tile, if not using layout.
+            resample_method (str, optional): The resample method to use for the reprojection.
+                This is represented by a constant. If none is specified, then ``NEARESTNEIGHBOR``
+                is used.
+
+        Note:
+            ``extent`` and ``layout`` must both be defined if they are to be used.
+
+        Returns:
+            :class:`~geopyspark.geotrellis.rdd.TiledRasterRDD`
+        """
+
+        return self.tile_to_layout(self.collect_metadata(extent, layout, crs, tile_size),
+                                   resample_method)
 
     def collect_metadata(self, extent=None, layout=None, crs=None, tile_size=256):
         """Iterate over RDD records and generates layer metadata desribing the contained rasters.
@@ -126,7 +157,7 @@ class RasterRDD(object):
         Args:
             extent (:ref:`extent`, optional): Specify layout extent, must also specify layout.
             layout (:ref:`tile_layout`, optional): Specify tile layout, must also specify extent.
-            crs (str, int, optional): Ignore CRS from records and use given one instead.
+            crs (str or int, optional): Ignore CRS from records and use given one instead.
             tile_size (int, optional): Pixel dimensions of each tile, if not using layout.
 
         Note:
@@ -142,6 +173,9 @@ class RasterRDD(object):
         if not crs:
             crs = ""
 
+        if isinstance(crs, int):
+            crs = str(crs)
+
         if extent and layout:
             json_metadata = self.srdd.collectMetadata(extent, layout, crs)
         elif not extent and not layout:
@@ -155,7 +189,7 @@ class RasterRDD(object):
         """Reproject every individual raster to `target_crs`, does not sample past tile boundary
 
         Args:
-            target_crs (int, str): The CRS to reproject to. Can either be the EPSG code,
+            target_crs (str or int): The CRS to reproject to. Can either be the EPSG code,
                 well-known name, or a PROJ.4 projection string.
             resample_method (str, optional): The resample method to use for the reprojection.
                 This is represented by a constant. If none is specified, then `NEARESTNEIGHBOR`
@@ -167,6 +201,9 @@ class RasterRDD(object):
 
         if resample_method not in RESAMPLE_METHODS:
             raise ValueError(resample_method, " Is not a known resample method.")
+
+        if isinstance(target_crs, int):
+            target_crs = str(target_crs)
 
         return RasterRDD(self.geopysc, self.rdd_type,
                          self.srdd.reproject(target_crs, resample_method))
@@ -209,7 +246,8 @@ class RasterRDD(object):
         srdd = self.srdd.tileToLayout(json.dumps(layer_metadata), resample_method)
         return TiledRasterRDD(self.geopysc, self.rdd_type, srdd)
 
-    def reclassify(self, value_map, data_type, boundary_strategy=LESSTHANOREQUALTO, replace_nodata_with=None):
+    def reclassify(self, value_map, data_type, boundary_strategy=LESSTHANOREQUALTO,
+                   replace_nodata_with=None):
         """Changes the cell values of a raster based on how the data is broken up.
 
         Args:
@@ -219,9 +257,9 @@ class RasterRDD(object):
                 ``float``.
             boundary_strategy (str, optional): How the cells should be classified along the breaks.
                 If unspecified, then ``LESSTHANOREQUALTO`` will be used.
-            replace_nodata_with (data_type, optional): When remapping values, nodata values must be 
-                treated separately.  If nodata values are intended to be replaced during the 
-                reclassify, this variable should be set to the intended value.  If unspecified, 
+            replace_nodata_with (data_type, optional): When remapping values, nodata values must be
+                treated separately.  If nodata values are intended to be replaced during the
+                reclassify, this variable should be set to the intended value.  If unspecified,
                 nodata values will be preserved.
 
         NOTE:
@@ -237,6 +275,15 @@ class RasterRDD(object):
         srdd = _reclassify(self.srdd, value_map, data_type, boundary_strategy, replace_nodata_with)
 
         return RasterRDD(self.geopysc, self.rdd_type, srdd)
+
+    def get_min_max(self):
+        """Returns the maximum and minimum values of all of the rasters in the RDD.
+
+        Returns:
+            (float, float)
+        """
+        min_max = self.srdd.getMinMax()
+        return (min_max._1(), min_max._2())
 
 
 class TiledRasterRDD(object):
@@ -298,7 +345,7 @@ class TiledRasterRDD(object):
         key = geopysc.map_key_input(rdd_type, True)
 
         schema = geopysc.create_schema(key)
-        ser = geopysc.create_tuple_serializer(schema, key_type=None, value_type=TILE)
+        ser = geopysc.create_tuple_serializer(schema, key_type="Projected", value_type=TILE)
         reserialized_rdd = numpy_rdd._reserialize(ser)
 
         if rdd_type == SPATIAL:
@@ -325,7 +372,7 @@ class TiledRasterRDD(object):
                 string or a ``Polygon``. If the value is a string, it must be the WKT string,
                 geometry format.
             extent (:ref:`extent`): The ``extent`` of the new raster.
-            crs (str): The CRS the new raster should be in.
+            crs (str or int): The CRS the new raster should be in.
             cols (int): The number of cols the new raster should have.
             rows (int): The number of rows the new raster should have.
             fill_value (int): The value to fill the raster with.
@@ -352,6 +399,9 @@ class TiledRasterRDD(object):
             except:
                 raise TypeError(geometry, "Needs to be either a Shapely Geometry or a string")
 
+        if isinstance(crs, int):
+            crs = str(crs)
+
         if instant and rdd_type != SPATIAL:
             srdd = geopysc._jvm.geopyspark.geotrellis.TemporalTiledRasterRDD.rasterize(
                 geopysc.sc, geometry, extent, crs, instant, cols, rows, fill_value)
@@ -374,7 +424,7 @@ class TiledRasterRDD(object):
             RDD
         """
         result = self.srdd.toAvroRDD()
-        ser = self.geopysc.create_tuple_serializer(result._2(), value_type=TILE)
+        ser = self.geopysc.create_tuple_serializer(result._2(), key_type="Projected", value_type=TILE)
         return self.geopysc.create_python_rdd(result._1(), ser)
 
     def reproject(self, target_crs, extent=None, layout=None, scheme=FLOAT, tile_size=256,
@@ -382,7 +432,7 @@ class TiledRasterRDD(object):
         """Reproject RDD as tiled raster layer, samples surrounding tiles.
 
         Args:
-            target_crs (int, str): The CRS to reproject to. Can either be the EPSG code,
+            target_crs (str or int): The CRS to reproject to. Can either be the EPSG code,
                 well-known name, or a PROJ.4 projection string.
                 extent (:ref:`extent`, optional): Specify layout extent, must also specify layout.
             layout (:ref:`tile_layout`, optional): Specify tile layout, must also specify extent.
@@ -408,6 +458,9 @@ class TiledRasterRDD(object):
 
         if resample_method not in RESAMPLE_METHODS:
             raise ValueError(resample_method, " Is not a known resample method.")
+
+        if isinstance(target_crs, int):
+            target_crs = str(target_crs)
 
         if extent and layout:
             srdd = self.srdd.reproject(extent, layout, target_crs, resample_method)
@@ -496,35 +549,59 @@ class TiledRasterRDD(object):
 
         return [TiledRasterRDD(self.geopysc, self.rdd_type, srdd) for srdd in result]
 
-    def focal(self, operation, neighborhood, param_1=None, param_2=None, param_3=None):
+    def focal(self, operation, neighborhood=None, param_1=None, param_2=None, param_3=None):
         """Performs the given focal operation on the layers contained in the RDD.
 
         Args:
             operation (str): The focal operation such as SUM, ASPECT, SLOPE, etc.
-            neighborhood (str): The type of neighborhood to use such as ANNULUS, SQUARE, etc.
-            param_1 (int, optional): If using SLOPE, then this is the zFactor, else it is the first
-                argument of the `neighborhood`.
-            param_2 (int, optional): The second argument of the `neighborhood`.
-            param_3 (int, optional): The third argument of the `neighborhood`.
+            neighborhood (str or :class:`~geopyspark.geotrellis.neighborhoods.Neighborhood`, optional):
+                The type of neighborhood to use in the focal operation. This can be represented by
+                either an instance of ``Neighborhood``, or by a constant such as ANNULUS, SQUARE,
+                etc. Defaults to ``None``.
+            param_1 (int or float, optional): If using ``SLOPE``, then this is the zFactor, else it
+                is the first argument of ``neighborhood``.
+            param_2 (int or float, optional): The second argument of the `neighborhood`.
+            param_3 (int or float, optional): The third argument of the `neighborhood`.
 
         Note:
+            ``param``s only need to be set if ``neighborhood`` is not an instance of
+            ``Neighborhood`` or if ``neighborhood`` is ``None``.
+
             Any `param` that is not set will default to 0.0.
+
+            If ``neighborhood`` is ``None`` then ``operation`` **must** be either ``SLOPE`` or
+            ``ASPECT``.
 
         Returns:
             :class:`~geopyspark.geotrellis.rdd.TiledRasterRDD`
         """
 
         if operation not in OPERATIONS:
-            raise ValueError(operation, " Is not a known operation.")
+            raise ValueError(operation, "Is not a known operation.")
 
-        if param_1 is None:
-            param_1 = 0.0
-        if param_2 is None:
-            param_2 = 0.0
-        if param_3 is None:
-            param_3 = 0.0
+        if isinstance(neighborhood, Neighborhood):
+            srdd = self.srdd.focal(operation, neighborhood.name, neighborhood.param_1,
+                                   neighborhood.param_2, neighborhood.param_3)
 
-        srdd = self.srdd.focal(operation, neighborhood, param_1, param_2, param_3)
+        elif isinstance(neighborhood, str):
+            if neighborhood not in NEIGHBORHOODS:
+                raise ValueError(neighborhood, "is not a known neighborhood.")
+
+            if param_1 is None:
+                param_1 = 0.0
+            if param_2 is None:
+                param_2 = 0.0
+            if param_3 is None:
+                param_3 = 0.0
+
+            srdd = self.srdd.focal(operation, neighborhood, float(param_1), float(param_2),
+                                   float(param_3))
+
+        elif not neighborhood and operation == SLOPE or operation == ASPECT:
+            srdd = self.srdd.focal(operation, SQUARE, 1.0, 0.0, 0.0)
+
+        else:
+            raise ValueError("neighborhood must be set or the operation must be SLOPE or ASPECT")
 
         return TiledRasterRDD(self.geopysc, self.rdd_type, srdd)
 
@@ -570,18 +647,20 @@ class TiledRasterRDD(object):
 
                 Note:
                     All geometries must be in the same CRS as the TileLayer.
-            max_distance (int): The maximum ocst that a path may reach before operation.
+            max_distance (int, float): The maximum ocst that a path may reach before operation.
+                This value can be an ``int`` or ``float``.
 
         Returns:
             :class:`~geopyspark.geotrellis.rdd.TiledRasterRDD`
         """
 
         wkts = [shapely.wkt.dumps(g) for g in geometries]
-        srdd = self.srdd.costDistance(self.geopysc.sc, wkts, max_distance)
+        srdd = self.srdd.costDistance(self.geopysc.sc, wkts, float(max_distance))
 
         return TiledRasterRDD(self.geopysc, self.rdd_type, srdd)
 
-    def reclassify(self, value_map, data_type, boundary_strategy=LESSTHANOREQUALTO, replace_nodata_with=None):
+    def reclassify(self, value_map, data_type, boundary_strategy=LESSTHANOREQUALTO,
+                   replace_nodata_with=None):
         """Changes the cell values of a raster based on how the data is broken up.
 
         Args:
@@ -591,9 +670,9 @@ class TiledRasterRDD(object):
                 ``float``.
             boundary_strategy (str, optional): How the cells should be classified along the breaks.
                 If unspecified, then ``LESSTHANOREQUALTO`` will be used.
-            replace_nodata_with (data_type, optional): When remapping values, nodata values must be 
-                treated separately.  If nodata values are intended to be replaced during the 
-                reclassify, this variable should be set to the intended value.  If unspecified, 
+            replace_nodata_with (data_type, optional): When remapping values, nodata values must be
+                treated separately.  If nodata values are intended to be replaced during the
+                reclassify, this variable should be set to the intended value.  If unspecified,
                 nodata values will be preserved.
 
         NOTE:
@@ -609,6 +688,15 @@ class TiledRasterRDD(object):
         srdd = _reclassify(self.srdd, value_map, data_type, boundary_strategy, replace_nodata_with)
 
         return TiledRasterRDD(self.geopysc, self.rdd_type, srdd)
+
+    def get_min_max(self):
+        """Returns the maximum and minimum values of all of the rasters in the RDD.
+
+        Returns:
+            (float, float)
+        """
+        min_max = self.srdd.getMinMax()
+        return (min_max._1(), min_max._2())
 
     def _process_operation(self, value, operation):
         if isinstance(value, int) or isinstance(value, float):
