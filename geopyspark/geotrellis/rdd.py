@@ -656,6 +656,30 @@ class TiledRasterRDD(object):
         ser = self.geopysc.create_value_serializer(tup._2(), TILE)
         return ser.loads(tup._1())[0]
 
+    def save_stitched(self, path, crop_bounds=None):
+        """Stitch all of the rasters within the RDD into one raster.
+
+        Args:
+            path: The path of the geotiff to save.
+            crop_bounds: Optional bounds with which to crop the raster before saving.
+
+        Note:
+            This can only be used on `SPATIAL` TiledRasterRDDs.
+
+        Returns:
+            None
+        """
+
+        if self.rdd_type != SPATIAL:
+            raise ValueError("Only TiledRasterRDDs with a rdd_type of Spatial can use stitch()")
+
+        if crop_bounds:
+            self.srdd.save_stitched(path, list(crop_bounds))
+        else:
+            self.srdd.save_stitched(path)
+
+        return None
+
     def mask(self, geometries):
         """Performs cost distance of a TileLayer.
 
