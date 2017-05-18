@@ -37,7 +37,9 @@ abstract class LayerReaderWrapper {
   def read(
     keyType: String,
     layerName: String,
-    zoom: Int): TiledRasterRDD[_]
+    zoom: Int,
+    numPartitions: Int
+  ): TiledRasterRDD[_]
 
   def query(
     keyType: String,
@@ -45,7 +47,8 @@ abstract class LayerReaderWrapper {
     zoom: Int,
     queryGeometryString: String,
     queryIntervalStrings: ArrayList[String],
-    projQuery: String
+    projQuery: String,
+    numPartitions: Int
   ): TiledRasterRDD[_]
 }
 
@@ -60,6 +63,9 @@ abstract class FilteringLayerReaderWrapper()
   def attributeStore: AttributeStore
   def layerReader: FilteringLayerReader[LayerId]
 
+  def layerIds: Array[java.util.Map[String, Any]] =
+    attributeStore.layerIds.map { x => Map("name" -> x.name, "zoom" -> x.zoom).asJava }.toArray
+
   def getValueClass(id: LayerId): String =
     attributeStore.readHeader[LayerHeader](id).valueClass
 
@@ -69,26 +75,27 @@ abstract class FilteringLayerReaderWrapper()
   def read(
     keyType: String,
     layerName: String,
-    zoom: Int
+    zoom: Int,
+    numPartitions: Int
   ): TiledRasterRDD[_] = {
     val id = LayerId(layerName, zoom)
     val valueClass = getValueClass(id)
 
     (keyType, valueClass) match {
       case ("SpatialKey", "geotrellis.raster.Tile") => {
-        val result = layerReader.read[SpatialKey, Tile, TileLayerMetadata[SpatialKey]](id)
+        val result = layerReader.read[SpatialKey, Tile, TileLayerMetadata[SpatialKey]](id, numPartitions)
         new SpatialTiledRasterRDD(Some(zoom), MultibandTileLayerRDD(tileToMultiband[SpatialKey](result), result.metadata))
       }
       case ("SpatialKey", "geotrellis.raster.MultibandTile") => {
-        val result = layerReader.read[SpatialKey, MultibandTile, TileLayerMetadata[SpatialKey]](id)
+        val result = layerReader.read[SpatialKey, MultibandTile, TileLayerMetadata[SpatialKey]](id, numPartitions)
         new SpatialTiledRasterRDD(Some(zoom), MultibandTileLayerRDD(result, result.metadata))
       }
       case ("SpaceTimeKey", "geotrellis.raster.Tile") => {
-        val result = layerReader.read[SpaceTimeKey, Tile, TileLayerMetadata[SpaceTimeKey]](id)
+        val result = layerReader.read[SpaceTimeKey, Tile, TileLayerMetadata[SpaceTimeKey]](id, numPartitions)
         new TemporalTiledRasterRDD(Some(zoom), MultibandTileLayerRDD(tileToMultiband[SpaceTimeKey](result), result.metadata))
       }
       case ("SpaceTimeKey", "geotrellis.raster.MultibandTile") => {
-        val result = layerReader.read[SpaceTimeKey, MultibandTile, TileLayerMetadata[SpaceTimeKey]](id)
+        val result = layerReader.read[SpaceTimeKey, MultibandTile, TileLayerMetadata[SpaceTimeKey]](id, numPartitions)
         new TemporalTiledRasterRDD(Some(zoom), MultibandTileLayerRDD(result, result.metadata))
       }
     }
@@ -136,7 +143,8 @@ abstract class FilteringLayerReaderWrapper()
     zoom: Int,
     queryGeometryString: String,
     queryIntervalStrings: ArrayList[String],
-    projQuery: String
+    projQuery: String,
+    numPartitions: Int
   ): TiledRasterRDD[_] = {
     val id = LayerId(layerName, zoom)
     val valueClass = getValueClass(id)
@@ -145,7 +153,7 @@ abstract class FilteringLayerReaderWrapper()
 
     (keyType, valueClass) match {
       case ("SpatialKey", "geotrellis.raster.Tile") => {
-        val layer = layerReader.query[SpatialKey, Tile, TileLayerMetadata[SpatialKey]](id)
+        val layer = layerReader.query[SpatialKey, Tile, TileLayerMetadata[SpatialKey]](id, numPartitions)
         val layerCRS = layer.result.metadata.crs
         val query = (queryCRS, spatialQuery) match {
           case (Some(crs), Some(point: Point)) => layer.where(Contains(point.reproject(layerCRS, crs)))
@@ -167,7 +175,7 @@ abstract class FilteringLayerReaderWrapper()
       }
 
       case ("SpatialKey", "geotrellis.raster.MultibandTile") => {
-        val layer = layerReader.query[SpatialKey, MultibandTile, TileLayerMetadata[SpatialKey]](id)
+        val layer = layerReader.query[SpatialKey, MultibandTile, TileLayerMetadata[SpatialKey]](id, numPartitions)
         val layerCRS = layer.result.metadata.crs
         val query = (queryCRS, spatialQuery) match {
           case (Some(crs), Some(polygon: Polygon)) => layer.where(Intersects(polygon.reproject(layerCRS, crs)))
@@ -185,7 +193,7 @@ abstract class FilteringLayerReaderWrapper()
       case ("SpaceTimeKey", "geotrellis.raster.Tile") => {
         val temporalQuery = getTemporalQuery(queryIntervalStrings)
 
-        val layer = layerReader.query[SpaceTimeKey, Tile, TileLayerMetadata[SpaceTimeKey]](id)
+        val layer = layerReader.query[SpaceTimeKey, Tile, TileLayerMetadata[SpaceTimeKey]](id, numPartitions)
         val layerCRS = layer.result.metadata.crs
         val query1 = (queryCRS, spatialQuery) match {
           case (Some(crs), Some(polygon: Polygon)) => layer.where(Intersects(polygon.reproject(layerCRS, crs)))
@@ -209,7 +217,7 @@ abstract class FilteringLayerReaderWrapper()
       case ("SpaceTimeKey", "geotrellis.raster.MultibandTile") => {
         val temporalQuery = getTemporalQuery(queryIntervalStrings)
 
-        val layer = layerReader.query[SpaceTimeKey, MultibandTile, TileLayerMetadata[SpaceTimeKey]](id)
+        val layer = layerReader.query[SpaceTimeKey, MultibandTile, TileLayerMetadata[SpaceTimeKey]](id, numPartitions)
         val layerCRS = layer.result.metadata.crs
         val query1 = (queryCRS, spatialQuery) match {
           case (Some(crs), Some(polygon: Polygon)) => layer.where(Intersects(polygon.reproject(layerCRS, crs)))

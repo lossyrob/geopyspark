@@ -49,19 +49,23 @@ Fields that can be set for ``HBase``:
  - **master** (str, optional): If not specified, then 'null' will be used.
 """
 
+import json
 from collections import namedtuple
 from urllib.parse import urlparse
 
 from geopyspark.geotrellis.rdd import TiledRasterRDD
 from geopyspark.geotrellis.constants import TILE, ZORDER, SPATIAL
 
-from shapely.geometry import Polygon, Point
+from shapely.geometry import Polygon, MultiPolygon, Point
 from shapely.wkt import dumps
 
 
 _mapped_cached = {}
 _mapped_serializers = {}
 _cached = namedtuple('Cached', ('store', 'reader', 'value_reader', 'writer'))
+
+_mapped_bounds = {}
+_bounds = namedtuple('Bounds', ('col_min', 'row_min', 'col_max', 'row_max'))
 
 
 def _construct_catalog(geopysc, new_uri, options):
@@ -161,12 +165,115 @@ def _construct_catalog(geopysc, new_uri, options):
                                           value_reader=value_reader,
                                           writer=writer)
 
+def _in_bounds(geopysc, rdd_type, uri, layer_name, zoom_level, col, row):
+    if (layer_name, zoom_level) not in _mapped_bounds:
+        layer_metadata = read_layer_metadata(geopysc, rdd_type, uri, layer_name, zoom_level)
+        bounds_dict = layer_metadata['bounds']
+        min_key = bounds_dict['minKey']
+        max_key = bounds_dict['maxKey']
+        bounds = _bounds(min_key['col'], min_key['row'], max_key['col'], max_key['row'])
+        _mapped_bounds[(layer_name, zoom_level)] = bounds
+    else:
+        bounds = _mapped_bounds[(layer_name, zoom_level)]
+
+    mins = col < bounds.col_min or row < bounds.row_min
+    maxs = col > bounds.col_max or row > bounds.row_max
+
+    if mins or maxs:
+        return False
+    else:
+        return True
+
+
+def read_layer_metadata(geopysc,
+                        rdd_type,
+                        uri,
+                        layer_name,
+                        layer_zoom,
+                        options=None,
+                        **kwargs):
+    """Reads the metadata from a saved layer without reading in the whole layer.
+
+    Args:
+        geopysc (GeoPyContext): The GeoPyContext being used this session.
+        rdd_type (str): What the spatial type of the geotiffs are. This is
+            represented by the constants: ``SPATIAL`` and ``SPACETIME``.
+        uri (str): The Uniform Resource Identifier used to point towards the desired GeoTrellis
+            catalog to be read from. The shape of this string varies depending on backend.
+        layer_name (str): The name of the GeoTrellis catalog to be read from.
+        layer_zoom (int): The zoom level of the layer that is to be read.
+        options (dict, optional): Additional parameters for reading the layer for specific backends.
+            The dictionary is only used for Cassandra and HBase, no other backend requires this
+            to be set.
+        numPartitions (int, optional): Sets RDD partition count when reading from catalog.
+        **kwargs: The optional parameters can also be set as keywords arguments. The keywords must
+            be in camel case. If both options and keywords are set, then the options will be used.
+
+    Returns:
+        :ref:`metadata`
+    """
+
+    if options:
+        options = options
+    elif kwargs:
+        options = kwargs
+    else:
+        options = {}
+
+    _construct_catalog(geopysc, uri, options)
+    cached = _mapped_cached[uri]
+
+    if rdd_type == SPATIAL:
+        metadata = cached.store.metadataSpatial(layer_name, layer_zoom)
+    else:
+        metadata = cached.store.metadataSpaceTime(layer_name, layer_zoom)
+
+    return json.loads(metadata)
+
+def get_layer_ids(geopysc,
+                  uri,
+                  options=None,
+                  **kwargs):
+    """Returns a list of all of the layer ids in the selected catalog as dicts that contain the
+    name and zoom of a given layer.
+
+    Args:
+        geopysc (GeoPyContext): The GeoPyContext being used this session.
+        uri (str): The Uniform Resource Identifier used to point towards the desired GeoTrellis
+            catalog to be read from. The shape of this string varies depending on backend.
+        options (dict, optional): Additional parameters for reading the layer for specific backends.
+            The dictionary is only used for Cassandra and HBase, no other backend requires this
+            to be set.
+        **kwargs: The optional parameters can also be set as keywords arguments. The keywords must
+            be in camel case. If both options and keywords are set, then the options will be used.
+
+    Returns:
+        [layerIds]
+
+        Where ``layerIds`` is a ``dict`` with the following fields:
+            - **name** (str): The name of the layer
+            - **zoom** (int): The zoom level of the given layer.
+    """
+
+    if options:
+        options = options
+    elif kwargs:
+        options = kwargs
+    else:
+        options = {}
+
+    _construct_catalog(geopysc, uri, options)
+    cached = _mapped_cached[uri]
+
+    return cached.reader.layerIds()
+
 def read(geopysc,
          rdd_type,
          uri,
          layer_name,
          layer_zoom,
          options=None,
+         numPartitions=None,
          **kwargs):
 
     """Reads a single, zoom layer from a GeoTrellis catalog.
@@ -189,6 +296,7 @@ def read(geopysc,
         options (dict, optional): Additional parameters for reading the layer for specific backends.
             The dictionary is only used for Cassandra and HBase, no other backend requires this
             to be set.
+        numPartitions (int, optional): Sets RDD partition count when reading from catalog.
         **kwargs: The optional parameters can also be set as keywords arguments. The keywords must
             be in camel case. If both options and keywords are set, then the options will be used.
 
@@ -208,7 +316,11 @@ def read(geopysc,
     cached = _mapped_cached[uri]
 
     key = geopysc.map_key_input(rdd_type, True)
-    srdd = cached.reader.read(key, layer_name, layer_zoom)
+
+    if numPartitions is None:
+        numPartitions  = geopysc.pysc.defaultMinPartitions
+
+    srdd = cached.reader.read(key, layer_name, layer_zoom, numPartitions)
 
     return TiledRasterRDD(geopysc, rdd_type, srdd)
 
@@ -226,6 +338,9 @@ def read_value(geopysc,
     """Reads a single tile from a GeoTrellis catalog.
     Unlike other functions in this module, this will not return a TiledRasterRDD, but rather a
     GeoPySpark formatted raster. This is the function to use when creating a tile server.
+
+    Note:
+        When requesting a tile that does not exist, ``None`` will be returned.
 
     Args:
         geopysc (GeoPyContext): The GeoPyContext being used this session.
@@ -247,38 +362,40 @@ def read_value(geopysc,
             be in camel case. If both options and keywords are set, then the options will be used.
 
     Returns:
-        :ref:`raster`
+        :ref:`raster` or ``None``
     """
 
-    if options:
-        options = options
-    elif kwargs:
-        options = kwargs
+    if not _in_bounds(geopysc, rdd_type, uri, layer_name, layer_zoom, col, row):
+        return None
     else:
-        options = {}
+        if options:
+            options = options
+        elif kwargs:
+            options = kwargs
+        else:
+            options = {}
 
-    _construct_catalog(geopysc, uri, options)
+        _construct_catalog(geopysc, uri, options)
+        cached = _mapped_cached[uri]
 
-    cached = _mapped_cached[uri]
+        if not zdt:
+            zdt = ""
 
-    if not zdt:
-        zdt = ""
+        key = geopysc.map_key_input(rdd_type, True)
 
-    key = geopysc.map_key_input(rdd_type, True)
+        tup = cached.value_reader.readTile(key,
+                                           layer_name,
+                                           layer_zoom,
+                                           col,
+                                           row,
+                                           zdt)
 
-    tup = cached.value_reader.readTile(key,
-                                       layer_name,
-                                       layer_zoom,
-                                       col,
-                                       row,
-                                       zdt)
+        ser = geopysc.create_value_serializer(tup._2(), TILE)
 
-    ser = geopysc.create_value_serializer(tup._2(), TILE)
+        if uri not in _mapped_serializers:
+            _mapped_serializers[uri] = ser
 
-    if uri not in _mapped_serializers:
-        _mapped_serializers[uri] = ser
-
-    return ser.loads(tup._1())[0]
+        return ser.loads(tup._1())[0]
 
 def query(geopysc,
           rdd_type,
@@ -289,6 +406,7 @@ def query(geopysc,
           time_intervals=None,
           proj_query=None,
           options=None,
+          numPartitions=None,
           **kwargs):
 
     """Queries a single, zoom layer from a GeoTrellis catalog given spatial and/or time parameters.
@@ -327,6 +445,7 @@ def query(geopysc,
         options (dict, optional): Additional parameters for querying the tile for specific backends.
             The dictioanry is only used for Cassandra and HBase, no other backend requires this
             to be set.
+        numPartitions (int, optional): Sets RDD partition count when reading from catalog.
         **kwargs: The optional parameters can also be set as keywords arguements. The keywords must
             be in camel case. If both options and keywords are set, then the options will be used.
 
@@ -355,14 +474,18 @@ def query(geopysc,
     if isinstance(proj_query, int):
         proj_query = "EPSG:" + str(proj_query)
 
+    if numPartitions is None:
+        numPartitions  = geopysc.pysc.defaultMinPartitions
 
-    if isinstance(intersects, Polygon) or isinstance(intersects, Point):
+    if isinstance(intersects, Polygon) or isinstance(intersects, MultiPolygon) \
+       or isinstance(intersects, Point):
         srdd = cached.reader.query(key,
                                    layer_name,
                                    layer_zoom,
                                    dumps(intersects),
                                    time_intervals,
-                                   proj_query)
+                                   proj_query,
+                                   numPartitions)
 
     elif isinstance(intersects, str):
         srdd = cached.reader.query(key,

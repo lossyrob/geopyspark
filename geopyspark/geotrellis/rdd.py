@@ -6,7 +6,8 @@ performing operations.
 import json
 import shapely.wkt
 
-from shapely.geometry import Polygon
+from pyspark.storagelevel import StorageLevel
+from shapely.geometry import Polygon, MultiPolygon
 from shapely.wkt import dumps
 from geopyspark.geotrellis.constants import (RESAMPLE_METHODS,
                                              OPERATIONS,
@@ -48,7 +49,49 @@ def _reclassify(srdd, value_map, data_type, boundary_strategy, replace_nodata_wi
             return srdd.reclassifyDouble(new_dict, boundary_strategy, replace_nodata_with)
 
 
-class RasterRDD(object):
+class RDDWrapper(object):
+    """
+    Base class for class that wraps a scala RDD instance through py4j reference.
+
+    Attributes:
+        geopysc (GeoPyContext): The GeoPyContext being used this session.
+        srdd (JavaObject): The coresponding scala RDD class.
+    """
+
+    def __init__(self):
+        self.is_cached = False
+
+    def cache(self):
+        """
+        Persist this RDD with the default storage level (C{MEMORY_ONLY}).
+        """
+        self.persist()
+        return self
+
+    def persist(self, storageLevel=StorageLevel.MEMORY_ONLY):
+        """
+        Set this RDD's storage level to persist its values across operations
+        after the first time it is computed. This can only be used to assign
+        a new storage level if the RDD does not have a storage level set yet.
+        If no storage level is specified defaults to (C{MEMORY_ONLY}).
+        """
+
+        javaStorageLevel = self.geopysc.pysc._getJavaStorageLevel(storageLevel)
+        self.is_cached = True
+        self.srdd.persist(javaStorageLevel)
+        return self
+
+    def unpersist(self):
+        """
+        Mark the RDD as non-persistent, and remove all blocks for it from
+        memory and disk.
+        """
+
+        self.is_cached = False
+        self.srdd.unpersist()
+        return self
+
+class RasterRDD(RDDWrapper):
     """A wrapper of a RDD that contains GeoTrellis rasters.
 
     Represents a RDD that contains (K, V). Where K is either :ref:`projected_extent` or
@@ -75,6 +118,7 @@ class RasterRDD(object):
     __slots__ = ['geopysc', 'rdd_type', 'srdd']
 
     def __init__(self, geopysc, rdd_type, srdd):
+        RDDWrapper.__init__(self)
         self.geopysc = geopysc
         self.rdd_type = rdd_type
         self.srdd = srdd
@@ -306,7 +350,7 @@ class RasterRDD(object):
         return (min_max._1(), min_max._2())
 
 
-class TiledRasterRDD(object):
+class TiledRasterRDD(RDDWrapper):
     """Wraps a RDD of tiled, GeoTrellis rasters.
 
     Represents a RDD that contains (K, V). Where K is either :ref:`spatial-key` or
@@ -333,6 +377,7 @@ class TiledRasterRDD(object):
     __slots__ = ['geopysc', 'rdd_type', 'srdd']
 
     def __init__(self, geopysc, rdd_type, srdd):
+        RDDWrapper.__init__(self)
         self.geopysc = geopysc
         self.rdd_type = rdd_type
         self.srdd = srdd
@@ -692,6 +737,9 @@ class TiledRasterRDD(object):
         Returns:
             :class:`~geopyspark.geotrellis.rdd.TiledRasterRDD`
         """
+
+        if not isinstance(geometries, list):
+            geometries = [geometries]
         wkts = [shapely.wkt.dumps(g) for g in geometries]
         srdd = self.srdd.mask(wkts)
 
@@ -756,6 +804,91 @@ class TiledRasterRDD(object):
         min_max = self.srdd.getMinMax()
         return (min_max._1(), min_max._2())
 
+    @staticmethod
+    def _process_polygonal_summary(geometry, operation):
+        if isinstance(geometry, Polygon) or isinstance(geometry, MultiPolygon):
+            geometry = dumps(geometry)
+        if not isinstance(geometry, str):
+            raise ValueError("geometry must be either a Polygon, MultiPolygon, or a String")
+
+        return operation(geometry)
+
+    def polygonal_min(self, geometry, data_type):
+        """Finds the min value that is contained within the given geometry.
+
+        Args:
+            geometry (Polygon or MultiPolygon or str): A Shapely Polygon or MultiPolygon that
+                represents the area where the summary should be computed; or a WKT string
+                representation of the geometry.
+            data_type (type): The type of the values within the rasters. Can either be ``int`` or
+                ``float``.
+
+        Returns:
+            int or float depending on ``data_type``.
+        """
+
+        if data_type is int:
+            return self._process_polygonal_summary(geometry, self.srdd.polygonalMin)
+        elif data_type is float:
+            return self._process_polygonal_summary(geometry, self.srdd.polygonalMinDouble)
+        else:
+            raise TypeError("data_type must be either int or float.")
+
+    def polygonal_max(self, geometry, data_type):
+        """Finds the max value that is contained within the given geometry.
+
+        Args:
+            geometry (Polygon or MultiPolygon or str): A Shapely Polygon or MultiPolygon that
+                represents the area where the summary should be computed; or a WKT string
+                representation of the geometry.
+            data_type (type): The type of the values within the rasters. Can either be ``int`` or
+                ``float``.
+
+        Returns:
+            int or float depending on ``data_type``.
+        """
+
+        if data_type is int:
+            return self._process_polygonal_summary(geometry, self.srdd.polygonalMax)
+        elif data_type is float:
+            return self._process_polygonal_summary(geometry, self.srdd.polygonalMaxDouble)
+        else:
+            raise TypeError("data_type must be either int or float.")
+
+    def polygonal_sum(self, geometry, data_type):
+        """Finds the sum of all of the values that are contained within the given geometry.
+
+        Args:
+            geometry (Polygon or MultiPolygon or str): A Shapely Polygon or MultiPolygon that
+                represents the area where the summary should be computed; or a WKT string
+                representation of the geometry.
+            data_type (type): The type of the values within the rasters. Can either be ``int`` or
+                ``float``.
+
+        Returns:
+            int or float depending on ``data_type``.
+        """
+
+        if data_type is int:
+            return self._process_polygonal_summary(geometry, self.srdd.polygonalSum)
+        elif data_type is float:
+            return self._process_polygonal_summary(geometry, self.srdd.polygonalSumDouble)
+        else:
+            raise TypeError("data_type must be either int or float.")
+
+    def polygonal_mean(self, geometry):
+        """Finds the mean of all of the values that are contained within the given geometry.
+
+        Args:
+            geometry (Polygon or MultiPolygon or str): A Shapely Polygon or MultiPolygon that
+                represents the area where the summary should be computed; or a WKT string
+                representation of the geometry.
+
+        Returns:
+            float
+        """
+
+        return self._process_polygonal_summary(geometry, self.srdd.polygonalMean)
     def get_quantile_breaks(self, num_breaks):
         """Returns quantile breaks for this RDD.
 
