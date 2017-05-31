@@ -1,16 +1,16 @@
-"""Constants that are used by geopyspark.geotrellis classes, methods, and functions."""
+"""Constants that are used by ``geopyspark.geotrellis`` classes, methods, and functions."""
 
 """
-Indicates that the RDD contains (K, V) pairs, where the K has a spatial attribute,
-but no time value. Both ProjectedExtent and SpatialKey are examples of this
-type of K.
+Indicates that the RDD contains ``(K, V)`` pairs, where the ``K`` has a spatial attribute,
+but no time value. Both :ref:`projected_extent` and :ref:`spatial-key`` are examples of this
+type of ``K``.
 """
 SPATIAL = 'spatial'
 
 """
-Indicates that the RDD contains (K, V) pairs, where the K has a spatial and
-time attribute. Both TemporalProjectedExtent and SpaceTimeKey are examples
-of this type of K.
+Indicates that the RDD contains ``(K, V)`` pairs, where the ``K`` has a spatial and
+time attribute. Both :ref:`temporal_extent` and :ref:`space-time-key` are examples
+of this type of ``K``.
 """
 SPACETIME = 'spacetime'
 
@@ -65,25 +65,28 @@ RESAMPLE_METHODS = [
 ]
 
 
-"""Layout scheme to match resolution of the closest level of TMS pyramid"""
+"""Layout scheme to match resolution of the closest level of TMS pyramid."""
 ZOOM = 'zoom'
 
-"""Layout scheme to match resolution of source rasters"""
+"""Layout scheme to match resolution of source rasters."""
 FLOAT = 'float'
 
 
-"""A key indexing method. Works for RDDs that contain both SpatialKeys and SpacetimeKeys."""
+"""A key indexing method. Works for RDD that contain both :ref:`spatial-key` and
+:ref:`space-time-key`.
+"""
 ZORDER = 'zorder'
 
 """
-A key indexing method. Works for RDDs that contain both SpatialKeys and SpacetimeKeys.
-Note, indexes are determined by the x, y, and if SPACETIME, the temporal resolutions of
-a point. This is expressed in bits, and has a max value of 62. Thus if the sum of those
-resolutions are greater than 62, then the indexing will fail
+A key indexing method. Works for RDDs that contain both :ref:`spatial-key` and
+:ref:`space-time-key`. Note, indexes are determined by the ``x``, ``y``, and if
+``SPACETIME``, the temporal resolutions of a point. This is expressed in bits, and
+has a max value of 62. Thus if the sum of those resolutions are greater than 62,
+then the indexing will fail.
 """
 HILBERT = 'hilbert'
 
-"""A key indexing method. Works only for RDDs that contain SpatialKeys.
+"""A key indexing method. Works only for RDDs that contain :ref:`spatial-key`.
 This method provides the fastest lookup of all the key indexing method, however, it does not give
 good locality guarantees. It is recommended then that this method should only be used when locality
 is not important for your analysis.
@@ -276,4 +279,80 @@ CELL_TYPES = [
     INT32UD,
     FLOAT32UD,
     FLOAT64UD
+]
+
+
+"""A ColorRamp."""
+HOT = "hot"
+
+"""A ColorRamp."""
+COOLWARM = "coolwarm"
+
+"""A ColorRamp."""
+MAGMA = "magma"
+
+"""A ColorRamp."""
+INFERNO = "inferno"
+
+"""A ColorRamp."""
+PLASMA = "plasma"
+
+"""A ColorRamp."""
+VIRIDIS = "viridis"
+
+"""A ColorRamp."""
+BLUE_TO_ORANGE = "BlueToOrange"
+
+"""A ColorRamp."""
+LIGHT_YELLOW_TO_ORANGE = "LightYellowToOrange"
+
+"""A ColorRamp."""
+BLUE_TO_RED = "BlueToRed"
+
+"""A ColorRamp."""
+GREEN_TO_RED_ORANGE = "GreenToRedOrange"
+
+"""A ColorRamp."""
+LIGHT_TO_DARK_SUNSET = "LightToDarkSunset"
+
+"""A ColorRamp."""
+LIGHT_TO_DARK_GREEN = "LightToDarkGreen"
+
+"""A ColorRamp."""
+HEATMAP_YELLOW_TO_RED = "HeatmapYellowToRed"
+
+"""A ColorRamp."""
+HEATMAP_BLUE_TO_YELLOW_TO_RED_SPECTRUM = "HeatmapBlueToYellowToRedSpectrum"
+
+"""A ColorRamp."""
+HEATMAP_DARK_RED_TO_YELLOW_WHITE = "HeatmapDarkRedToYellowWhite"
+
+"""A ColorRamp."""
+HEATMAP_LIGHT_PURPLE_TO_DARK_PURPLE_TO_WHITE = "HeatmapLightPurpleToDarkPurpleToWhite"
+
+"""A ColorRamp."""
+CLASSIFICATION_BOLD_LAND_USE = "ClassificationBoldLandUse"
+
+"""A ColorRamp."""
+CLASSIFICATION_MUTED_TERRAIN = "ClassificationMutedTerrain"
+
+COLOR_RAMPS = [
+    HOT,
+    COOLWARM,
+    MAGMA,
+    INFERNO,
+    PLASMA,
+    VIRIDIS,
+    BLUE_TO_ORANGE,
+    LIGHT_YELLOW_TO_ORANGE,
+    BLUE_TO_RED,
+    GREEN_TO_RED_ORANGE,
+    LIGHT_TO_DARK_SUNSET,
+    LIGHT_TO_DARK_GREEN,
+    HEATMAP_YELLOW_TO_RED,
+    HEATMAP_BLUE_TO_YELLOW_TO_RED_SPECTRUM,
+    HEATMAP_DARK_RED_TO_YELLOW_WHITE,
+    HEATMAP_LIGHT_PURPLE_TO_DARK_PURPLE_TO_WHITE,
+    CLASSIFICATION_BOLD_LAND_USE,
+    CLASSIFICATION_MUTED_TERRAIN
 ]

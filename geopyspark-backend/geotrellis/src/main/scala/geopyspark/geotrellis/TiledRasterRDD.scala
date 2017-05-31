@@ -5,6 +5,8 @@ import geopyspark.geotrellis.GeoTrellisUtils._
 import geotrellis.proj4._
 import geotrellis.raster._
 import geotrellis.raster.io.geotiff._
+import geotrellis.raster.distance._
+import geotrellis.raster.histogram._
 import geotrellis.raster.rasterize._
 import geotrellis.raster.render._
 import geotrellis.raster.resample.ResampleMethod
@@ -19,14 +21,18 @@ import geotrellis.spark.mask.Mask
 import geotrellis.spark.pyramid._
 import geotrellis.spark.reproject._
 import geotrellis.spark.tiling._
+import geotrellis.spark.util._
 import geotrellis.util._
 import geotrellis.vector._
 import geotrellis.vector.io.wkt.WKT
+import geotrellis.vector.triangulation._
+import geotrellis.vector.voronoi._
 
 import spray.json._
 import spray.json.DefaultJsonProtocol._
 import spire.syntax.cfor._
 
+import com.vividsolutions.jts.geom.Coordinate
 import org.apache.spark._
 import org.apache.spark.api.java.JavaRDD
 import org.apache.spark.rdd._
@@ -273,6 +279,12 @@ abstract class TiledRasterRDD[K: SpatialComponent: AvroRecordCodec: JsonFormat: 
       case poly: Polygon => singleTileLayerRDD.polygonalSumDouble(poly)
       case multi: MultiPolygon => singleTileLayerRDD.polygonalSumDouble(multi)
     }
+
+  def isFloatingPointLayer(): Boolean = rdd.metadata.cellType.isFloatingPoint
+
+  def getIntHistograms(): Histogram[Int] = rdd.histogramExactInt.head
+
+  def getDoubleHistograms(): Histogram[Double] = rdd.histogram.head
 
   protected def withRDD(result: RDD[(K, MultibandTile)]): TiledRasterRDD[K]
 }
@@ -645,6 +657,56 @@ object SpatialTiledRasterRDD {
 
     SpatialTiledRasterRDD(None, MultibandTileLayerRDD(rdd.tileToLayout(metadata), metadata))
   }
+
+  def euclideanDistance(sc: SparkContext, geomWKT: String, geomCRSStr: String, cellTypeString: String, requestedZoom: Int): TiledRasterRDD[SpatialKey]= {
+    val cellType = CellType.fromName(cellTypeString)
+    val geom = geotrellis.vector.io.wkt.WKT.read(geomWKT)
+    val srcCRS = TileRDD.getCRS(geomCRSStr).get
+    val LayoutLevel(z, ld) = ZoomedLayoutScheme(srcCRS).levelForZoom(requestedZoom)
+    val maptrans = ld.mapTransform
+    val gb @ GridBounds(cmin, rmin, cmax, rmax) = maptrans(geom.envelope)
+
+    val keys = for (r <- rmin to rmax; c <- cmin to cmax) yield SpatialKey(c, r)
+
+    val pts =
+      if (geom.isInstanceOf[MultiPoint]) {
+        geom.asInstanceOf[MultiPoint].points.map(_.jtsGeom.getCoordinate)
+      } else {
+        val coords = collection.mutable.ListBuffer.empty[Coordinate]
+
+        def createPoints(sk: SpatialKey) = {
+          val ex = maptrans(sk)
+          val re = RasterExtent(ex, ld.tileCols, ld.tileRows)
+
+          def rasterizeToPoints(px: Int, py: Int): Unit = {
+            val (x, y) = re.gridToMap(px, py)
+            val coord = new Coordinate(x, y)
+            coords += coord
+          }
+
+          Rasterizer.foreachCellByGeometry(geom, re)(rasterizeToPoints)
+        }
+
+        keys.foreach(createPoints)
+        coords.toArray
+      }
+
+    val dt = KryoWrapper(DelaunayTriangulation(pts))
+    val skRDD = sc.parallelize(keys)
+    val mbtileRDD: RDD[(SpatialKey, MultibandTile)] = skRDD.mapPartitions({ skiter => skiter.map { sk =>
+      val ex = maptrans(sk)
+      val re = RasterExtent(ex, ld.tileCols, ld.tileRows)
+      val tile = ArrayTile.empty(cellType, re.cols, re.rows)
+      val vd = new VoronoiDiagram(dt.value, ex)
+      vd.voronoiCellsWithPoints.foreach(EuclideanDistanceTile.rasterizeDistanceCell(re, tile)(_))
+      (sk, MultibandTile(tile))
+    } }, preservesPartitioning=true)
+
+    val metadata = TileLayerMetadata(cellType, ld, maptrans(gb), srcCRS, KeyBounds(gb))
+
+    SpatialTiledRasterRDD(Some(z), MultibandTileLayerRDD(mbtileRDD, metadata))
+  }
+
 }
 
 object TemporalTiledRasterRDD {
